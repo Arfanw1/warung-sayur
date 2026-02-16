@@ -2,11 +2,15 @@ name: Build APK from ZIP upload
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
       - "uploads/**/*.zip"
       - ".github/workflows/build_from_zip.yml"
   workflow_dispatch:
+
+concurrency:
+  group: build-from-zip-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -22,11 +26,16 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Setup Flutter
+      # ✅ FIX: jangan pakai flutter-version: "stable"
+      # Pakai channel: stable saja supaya tidak error.
+      - name: Setup Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "stable"
+          channel: stable
           cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
 
       - name: Pick latest ZIP in uploads/
         id: pickzip
@@ -35,42 +44,51 @@ jobs:
           set -e
           ZIP_FILE="$(ls -t uploads/*.zip 2>/dev/null | head -n 1 || true)"
           if [ -z "$ZIP_FILE" ]; then
-            echo "No zip found in uploads/. Upload a zip to uploads/ and commit it."
+            echo "❌ Tidak ada file .zip di folder uploads/"
+            echo "➡️ Upload ZIP ke uploads/ lalu commit."
             exit 1
           fi
-          echo "zip_path=$ZIP_FILE" >> $GITHUB_OUTPUT
-          echo "Using ZIP: $ZIP_FILE"
+          echo "zip_path=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "✅ Using ZIP: $ZIP_FILE"
 
-      - name: Clean workspace and unzip
+      - name: Prepare workspace and unzip
         shell: bash
         run: |
           set -e
-          mkdir -p _work
-          rm -rf _work/app
+          rm -rf _work
           mkdir -p _work/app
           unzip -q "${{ steps.pickzip.outputs.zip_path }}" -d _work/app
 
-          # If ZIP contains a single top-level folder, enter it
-          TOP="$(find _work/app -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-          FILECOUNT="$(find _work/app -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
-          if [ "$FILECOUNT" = "1" ] && [ -d "$TOP" ]; then
-            echo "Single root folder detected: $TOP"
-            mv "$TOP"/* _work/app/
-            mv "$TOP"/.[!.]* _work/app/ 2>/dev/null || true
-            rm -rf "$TOP"
+          echo "== After unzip =="
+          ls -la _work/app
+
+          # Jika ZIP isinya hanya 1 folder root (misal: warung_sayur/), pindahkan isinya ke _work/app
+          TOP_DIR="$(find _work/app -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+          ITEM_COUNT="$(find _work/app -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+
+          if [ "$ITEM_COUNT" = "1" ] && [ -n "$TOP_DIR" ] && [ -d "$TOP_DIR" ]; then
+            echo "✅ Single top-level folder detected: $TOP_DIR"
+            shopt -s dotglob
+            mv "$TOP_DIR"/* _work/app/
+            rm -rf "$TOP_DIR"
           fi
 
-          echo "Unzipped contents:"
+          echo "== Workspace root =="
           ls -la _work/app
+
+          if [ ! -f "_work/app/pubspec.yaml" ]; then
+            echo "❌ pubspec.yaml tidak ditemukan di root project setelah unzip."
+            echo "➡️ Pastikan ZIP berisi project Flutter dan pubspec.yaml ada di root."
+            exit 1
+          fi
 
       - name: Ensure Android platform exists
         shell: bash
         run: |
           set -e
           cd _work/app
-          # If android/ doesn't exist, generate platform folder
           if [ ! -d "android" ]; then
-            echo "android/ not found. Generating android platform..."
+            echo "android/ tidak ada. Generate platform android..."
             flutter create --platforms=android .
           fi
 
@@ -81,16 +99,16 @@ jobs:
           cd _work/app
           flutter pub get
 
-      - name: Run build_runner (if needed)
+      - name: Run build_runner (optional)
         shell: bash
         run: |
           set -e
           cd _work/app
-          # Run build_runner only if project uses it
           if grep -q "build_runner" pubspec.yaml; then
+            echo "build_runner terdeteksi. Jalankan codegen..."
             dart run build_runner build --delete-conflicting-outputs
           else
-            echo "No build_runner dependency found, skipping."
+            echo "build_runner tidak ada. Skip."
           fi
 
       - name: Build APK (release)
