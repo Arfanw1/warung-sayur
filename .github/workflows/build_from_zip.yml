@@ -1,0 +1,107 @@
+name: Build APK from ZIP upload
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "uploads/**/*.zip"
+      - ".github/workflows/build_from_zip.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "stable"
+          cache: true
+
+      - name: Pick latest ZIP in uploads/
+        id: pickzip
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE="$(ls -t uploads/*.zip 2>/dev/null | head -n 1 || true)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No zip found in uploads/. Upload a zip to uploads/ and commit it."
+            exit 1
+          fi
+          echo "zip_path=$ZIP_FILE" >> $GITHUB_OUTPUT
+          echo "Using ZIP: $ZIP_FILE"
+
+      - name: Clean workspace and unzip
+        shell: bash
+        run: |
+          set -e
+          mkdir -p _work
+          rm -rf _work/app
+          mkdir -p _work/app
+          unzip -q "${{ steps.pickzip.outputs.zip_path }}" -d _work/app
+
+          # If ZIP contains a single top-level folder, enter it
+          TOP="$(find _work/app -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          FILECOUNT="$(find _work/app -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+          if [ "$FILECOUNT" = "1" ] && [ -d "$TOP" ]; then
+            echo "Single root folder detected: $TOP"
+            mv "$TOP"/* _work/app/
+            mv "$TOP"/.[!.]* _work/app/ 2>/dev/null || true
+            rm -rf "$TOP"
+          fi
+
+          echo "Unzipped contents:"
+          ls -la _work/app
+
+      - name: Ensure Android platform exists
+        shell: bash
+        run: |
+          set -e
+          cd _work/app
+          # If android/ doesn't exist, generate platform folder
+          if [ ! -d "android" ]; then
+            echo "android/ not found. Generating android platform..."
+            flutter create --platforms=android .
+          fi
+
+      - name: Flutter pub get
+        shell: bash
+        run: |
+          set -e
+          cd _work/app
+          flutter pub get
+
+      - name: Run build_runner (if needed)
+        shell: bash
+        run: |
+          set -e
+          cd _work/app
+          # Run build_runner only if project uses it
+          if grep -q "build_runner" pubspec.yaml; then
+            dart run build_runner build --delete-conflicting-outputs
+          else
+            echo "No build_runner dependency found, skipping."
+          fi
+
+      - name: Build APK (release)
+        shell: bash
+        run: |
+          set -e
+          cd _work/app
+          flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: _work/app/build/app/outputs/flutter-apk/app-release.apk
